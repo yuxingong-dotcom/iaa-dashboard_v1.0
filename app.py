@@ -48,21 +48,53 @@ def get_session_index(key_name, available_options):
         return available_options.index(st.session_state[key_name])
     return 0 if available_options else None
 
-# ================= 模块 1: 🏆 大盘概览 (Benchmark) =================
-def render_benchmark_dashboard(raw_df):
+def clean_axis_labels(pivot_df):
     """
-    大盘概览
+    将索引 "B05:0.30-0.50" 转换为 "$0.30 - 0.50"
     """
-    st.sidebar.markdown("### 📌 基础数据池")
+    new_index = []
+    for label in pivot_df.index:
+        label_str = str(label)
+        if ':' in label_str:
+            price_part = label_str.split(':')[-1]
+            new_index.append(f"${price_part}")
+        else:
+            new_index.append(label_str)
+    pivot_df.index = new_index
+    return pivot_df
+
+def get_hidden_networks_hint(raw_df, df_pool):
+    """
+    对比原始数据和当前过滤后的数据，找出被过滤掉的网络，用于提示用户
+    """
+    if raw_df is None or df_pool is None:
+        return None
+    
+    # 原始所有网络
+    all_raw_nets = set(raw_df['轮替网络'].dropna().astype(str).unique())
+    # 当前池子里的网络
+    current_pool_nets = set(df_pool['轮替网络'].dropna().astype(str).unique())
+    
+    # 差集
+    hidden_nets = all_raw_nets - current_pool_nets
+    return sorted(list(hidden_nets))
+
+# ================= 统一侧边栏逻辑 =================
+def render_sidebar(raw_df):
+    """
+    统一的左侧筛选栏，返回经过基础维度过滤后的 DataFrame
+    """
+    st.sidebar.title("🔍 全局筛选")
+    st.sidebar.markdown("---")
     
     # 1. 广告类型 (必选)
     if 'Ad Type' not in raw_df.columns:
         st.error("❌ 数据源缺少 'Ad Type' 列，无法分析。")
-        return
+        return None, None
 
     all_adtypes = sorted(raw_df['Ad Type'].astype(str).unique().tolist())
     selected_adtype = st.sidebar.selectbox(
-        "1️⃣ 广告类型 (Ad Type):", options=all_adtypes, index=None, placeholder="请选择...", key="bench_ad"
+        "1️⃣ 广告类型 (必选):", options=all_adtypes, index=None, placeholder="请选择...", key="global_ad"
     )
 
     st.sidebar.markdown("#### 🔧 维度筛选")
@@ -70,12 +102,11 @@ def render_benchmark_dashboard(raw_df):
     # 2. 平台 (多选)
     if 'Platform' in raw_df.columns:
         all_platforms = sorted(raw_df['Platform'].astype(str).unique().tolist())
-        selected_platforms = st.sidebar.multiselect("2️⃣ 平台:", options=all_platforms, default=all_platforms, key="bench_plat")
+        selected_platforms = st.sidebar.multiselect("2️⃣ 平台:", options=all_platforms, default=all_platforms, key="global_plat")
     else:
         selected_platforms = []
-        st.sidebar.info("ℹ️ 数据无 'Platform' 维度")
-
-    # 3. 国家 (动态检测)
+        
+    # 3. 国家 (动态检测，留空全选)
     has_country = 'Country' in raw_df.columns
     mask_country = True 
 
@@ -85,7 +116,7 @@ def render_benchmark_dashboard(raw_df):
             "3️⃣ 国家 (留空则默认全选):", 
             options=all_countries, 
             default=[], 
-            key="bench_ctry"
+            key="global_ctry"
         )
         target_countries = selected_countries if selected_countries else all_countries
         mask_country = raw_df['Country'].isin(target_countries)
@@ -93,17 +124,61 @@ def render_benchmark_dashboard(raw_df):
         st.sidebar.info("🌐 数据源无 'Country' 列，展示全局数据")
 
     if not selected_adtype:
-        st.warning("👈 请在左侧选择 **广告类型** 以开始大盘分析。")
-        return
+        st.warning("👈 请在左侧选择 **广告类型** 以开始分析。")
+        return None, selected_adtype
 
-    # --- 数据过滤 ---
+    # --- 基础过滤 ---
     mask_ad = (raw_df['Ad Type'].astype(str) == selected_adtype)
     mask_plat = raw_df['Platform'].isin(selected_platforms) if 'Platform' in raw_df.columns else True
     
     mask_base = mask_ad & mask_plat & mask_country
     df_pool = raw_df[mask_base].copy()
     
-    if df_pool.empty:
+    return df_pool, selected_adtype
+
+
+# ================= 模块 0: 数据源预览 =================
+def render_data_preview_dashboard(raw_df):
+    st.header("📂 数据源预览 (Processed Data)")
+    st.info("💡 这是经过清洗、修正 eCPM、识别网络和划分区间后的完整数据。")
+
+    if raw_df is None or raw_df.empty:
+        st.warning("暂无数据")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("📊 总行数", f"{raw_df.shape[0]:,}")
+    c2.metric("📑 总列数", f"{raw_df.shape[1]}")
+    if 'Day' in raw_df.columns:
+        min_d, max_d = raw_df['Day'].min().date(), raw_df['Day'].max().date()
+        c3.metric("📅 数据时间段", f"{min_d} ~ {max_d}")
+        
+    # 新增：网络分布概览
+    st.markdown("##### 🕸️ 识别到的所有网络 (All Networks Found)")
+    all_nets = sorted(raw_df['轮替网络'].dropna().astype(str).unique().tolist())
+    st.write(f"共发现 {len(all_nets)} 个网络: {', '.join(all_nets)}")
+
+    st.divider()
+
+    st.subheader("1. 详细数据表")
+    st.dataframe(raw_df, use_container_width=True, height=600)
+
+    st.subheader("2. 导出数据")
+    csv = raw_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="⬇️ 下载处理后的 CSV",
+        data=csv,
+        file_name='processed_iaa_data.csv',
+        mime='text/csv',
+    )
+
+
+# ================= 模块 1: Waterfall 全局数据概览 =================
+def render_global_overview(df_pool, raw_df, selected_adtype):
+    """
+    原大盘概览升级版
+    """
+    if df_pool is None or df_pool.empty:
         st.error("⚠️ 当前筛选条件下无数据。")
         return
 
@@ -111,212 +186,259 @@ def render_benchmark_dashboard(raw_df):
     header_container = st.container()
     with header_container:
         st.markdown('<div class="sticky-nav">', unsafe_allow_html=True)
-        col_nav1, col_nav2 = st.columns([1, 2])
+        c1, c2, c3 = st.columns([1, 1, 1])
         
-        with col_nav1:
+        with c1:
             min_date, max_date = df_pool['Day'].min().date(), df_pool['Day'].max().date()
-            date_range = st.date_input("📅 日期范围:", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="bench_date")
+            date_range = st.date_input("📅 日期范围:", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="ov_date")
             start_date, end_date = date_range if len(date_range) == 2 else (min_date, max_date)
             
-        with col_nav2:
+        with c2:
             available_apps = sorted(df_pool['Application'].unique().tolist())
-            selected_apps = st.multiselect("📱 筛选 App (留空默认全选):", options=available_apps, default=[], key="bench_app_select")
+            selected_apps = st.multiselect("📱 筛选 App (留空全选):", options=available_apps, default=[], key="ov_app")
+            
+        with c3:
+            # 动态获取当前池子里的网络
+            available_nets = sorted(df_pool['轮替网络'].dropna().astype(str).unique().tolist())
+            selected_nets = st.multiselect("🕸️ 筛选 Network (留空全选):", options=available_nets, default=[], key="ov_net")
         
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 二次过滤
+    # --- 提示被过滤的网络 ---
+    hidden_nets = get_hidden_networks_hint(raw_df, df_pool)
+    if hidden_nets:
+        st.caption(f"ℹ️ **提示**: 以下网络在 **{selected_adtype}** 类型下无数据，因此未显示: {', '.join(hidden_nets)}")
+
+    # --- 二次过滤 ---
     target_apps = selected_apps if selected_apps else available_apps
+    target_nets = selected_nets if selected_nets else available_nets
+    
     mask_final = (
         (df_pool['Day'].dt.date >= start_date) & 
         (df_pool['Day'].dt.date <= end_date) &
-        (df_pool['Application'].isin(target_apps))
+        (df_pool['Application'].isin(target_apps)) &
+        (df_pool['轮替网络'].isin(target_nets))
     )
     df_filtered = df_pool[mask_final].copy()
 
     if df_filtered.empty:
-        st.error("⚠️ 当前时间或App筛选无数据。")
+        st.error("⚠️ 当前筛选无数据，请调整条件。")
         return
 
-    # --- 聚合与可视化 ---
-    st.header(f"🏆 大盘概览: {selected_adtype}")
+    st.header(f"🌊 Waterfall 全局数据概览: {selected_adtype}")
     
-    agg_matrix = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({
-        'Attempts': 'sum', 'Responses': 'sum', 'Revenue': 'sum'
-    }).reset_index()
-    
-    agg_matrix['Fill Rate'] = agg_matrix.apply(
-        lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else 0, axis=1
-    )
-    agg_matrix['RPM'] = agg_matrix.apply(
-        lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else 0, axis=1
-    )
-    
-    pivot_fill = agg_matrix.pivot(index='eCPM_Range', columns='轮替网络', values='Fill Rate').sort_index()
-    pivot_rpm = agg_matrix.pivot(index='eCPM_Range', columns='轮替网络', values='RPM').sort_index()
+    available_ranges = sorted(df_filtered['eCPM_Range'].unique().tolist())
 
-    if pivot_fill.empty:
-        st.warning("数据不足以生成图表")
-        return
-
-    # === 可视化调整部分 ===
-
-    # 1. 填充率 (Fill Rate %)
+    # ================= PART 1: Fill Rate =================
     st.subheader("1. 填充率 (Fill Rate %)")
-    c1, c2 = st.columns([3, 2])
     
-    with c1:
-        st.caption("🔥 热力图：动态色阶 (对比更鲜明)")
-        # 优化点：text_auto='.2f' 保留两位小数，去掉 range_color 实现动态上下限
+    agg_range = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({'Attempts': 'sum', 'Responses': 'sum'}).reset_index()
+    agg_range['Fill Rate'] = agg_range.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
+    
+    pivot_fill = agg_range.pivot(index='eCPM_Range', columns='轮替网络', values='Fill Rate').sort_index()
+    pivot_fill = clean_axis_labels(pivot_fill) 
+
+    if not pivot_fill.empty:
         fig_heat_fill = px.imshow(
-            pivot_fill.fillna(0),
-            labels=dict(x="Network", y="eCPM Range", color="Fill Rate (%)"),
-            x=pivot_fill.columns,
-            y=pivot_fill.index,
-            text_auto='.2f',  # 👈 变动：保留2位小数
+            pivot_fill,
+            labels=dict(x="Network", y="Price Range", color="Fill Rate (%)"),
+            text_auto='.2f', 
             aspect="auto",
-            color_continuous_scale="RdYlGn"
-            # range_color=[0, 100]  👈 变动：已移除，实现动态范围
+            color_continuous_scale="Greens"
         )
-        fig_heat_fill.update_layout(height=500, margin=dict(l=0,r=0,t=20,b=0))
+        fig_heat_fill.update_yaxes(tickfont=dict(size=12))
+        fig_heat_fill.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig_heat_fill, use_container_width=True)
-        
-    with c2:
-        st.caption("📋 详细数据表")
-        st.dataframe(
-            pivot_fill.style.format("{:.2f}%", na_rep="-")
-            .background_gradient(cmap='RdYlGn', axis=None) # axis=None 使得颜色基于整个表的 Max/Min 分布
-            .highlight_null(color='transparent'),
-            use_container_width=True, 
-            height=500
-        )
+    else:
+        st.info("无数据")
+
+    with st.expander("📅 每日趋势明细 (Daily Trend)", expanded=True):
+        c_filter, c_chart = st.columns([1, 4])
+        with c_filter:
+            st.markdown("<br>", unsafe_allow_html=True)
+            sel_range_fill = st.selectbox("🔍 eCPM 区间:", available_ranges, key="daily_fill_range")
+        with c_chart:
+            df_sub = df_filtered[df_filtered['eCPM_Range'] == sel_range_fill]
+            if not df_sub.empty:
+                agg_daily = df_sub.groupby(['Day', '轮替网络']).agg({'Attempts':'sum', 'Responses':'sum'}).reset_index()
+                agg_daily['Date_Str'] = agg_daily['Day'].dt.strftime('%Y-%m-%d')
+                agg_daily['Fill Rate'] = agg_daily.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
+                pivot_daily = agg_daily.pivot(index='轮替网络', columns='Date_Str', values='Fill Rate')
+                if not pivot_daily.empty:
+                    fig_d = px.imshow(pivot_daily, labels=dict(x="Date", y="Network", color="FR%"), text_auto='.2f', aspect="auto", color_continuous_scale="Greens")
+                    fig_d.update_layout(height=400, margin=dict(l=0,r=0,t=20,b=0))
+                    st.plotly_chart(fig_d, use_container_width=True)
+                else: st.warning("无数据")
+            else: st.warning("该区间无数据")
 
     st.divider()
-    
-    # 2. 变现效率 (RPM)
+
+    # ================= PART 2: RPM =================
     st.subheader("2. 变现效率 (RPM - Per 1M Requests)")
-    c3, c4 = st.columns([3, 2])
+
+    agg_rpm = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({'Attempts': 'sum', 'Revenue': 'sum'}).reset_index()
+    agg_rpm['RPM'] = agg_rpm.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
     
-    with c3:
-        st.caption("🔥 热力图：动态色阶")
-        # 优化点：text_auto='.2f'
+    pivot_rpm = agg_rpm.pivot(index='eCPM_Range', columns='轮替网络', values='RPM').sort_index()
+    pivot_rpm = clean_axis_labels(pivot_rpm)
+
+    if not pivot_rpm.empty:
         fig_heat_rpm = px.imshow(
-            pivot_rpm.fillna(0),
-            labels=dict(x="Network", y="eCPM Range", color="RPM ($)"),
-            x=pivot_rpm.columns,
-            y=pivot_rpm.index,
-            text_auto='.2f', # 👈 变动：保留2位小数
+            pivot_rpm,
+            labels=dict(x="Network", y="Price Range", color="RPM ($)"),
+            text_auto='.2f', 
             aspect="auto",
             color_continuous_scale="Blues"
         )
-        fig_heat_rpm.update_layout(height=500, margin=dict(l=0,r=0,t=20,b=0))
+        fig_heat_rpm.update_yaxes(tickfont=dict(size=12))
+        fig_heat_rpm.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig_heat_rpm, use_container_width=True)
-        
-    with c4:
-        st.caption("📋 详细数据表")
-        st.dataframe(
-            pivot_rpm.style.format("${:,.2f}", na_rep="-")
-            .background_gradient(cmap='Blues', axis=None)
-            .highlight_null(color='transparent'),
-            use_container_width=True, 
-            height=500
-        )
+
+    with st.expander("📅 每日趋势明细 (Daily Trend)", expanded=True):
+        c_filter_r, c_chart_r = st.columns([1, 4])
+        with c_filter_r:
+            st.markdown("<br>", unsafe_allow_html=True)
+            sel_range_rpm = st.selectbox("🔍 eCPM 区间:", available_ranges, key="daily_rpm_range")
+        with c_chart_r:
+            df_sub_r = df_filtered[df_filtered['eCPM_Range'] == sel_range_rpm]
+            if not df_sub_r.empty:
+                agg_daily_r = df_sub_r.groupby(['Day', '轮替网络']).agg({'Attempts':'sum', 'Revenue':'sum'}).reset_index()
+                agg_daily_r['Date_Str'] = agg_daily_r['Day'].dt.strftime('%Y-%m-%d')
+                agg_daily_r['RPM'] = agg_daily_r.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
+                pivot_daily_r = agg_daily_r.pivot(index='轮替网络', columns='Date_Str', values='RPM')
+                if not pivot_daily_r.empty:
+                    fig_dr = px.imshow(pivot_daily_r, labels=dict(x="Date", y="Network", color="RPM"), text_auto='.0f', aspect="auto", color_continuous_scale="Blues")
+                    fig_dr.update_layout(height=400, margin=dict(l=0,r=0,t=20,b=0))
+                    st.plotly_chart(fig_dr, use_container_width=True)
+                else: st.warning("无数据")
+            else: st.warning("该区间无数据")
 
 
-# ================= 模块 2: 🌊 Waterfall 诊断 =================
-def render_waterfall_dashboard(raw_df):
+# ================= 模块 2: Waterfall 细分数据 =================
+def render_breakdown_dashboard(df_pool, raw_df, selected_adtype):
     """
-    Waterfall 诊断
+    原 Waterfall 诊断升级版
     """
-    st.sidebar.markdown("### 📌 Waterfall 筛选")
-
-    # 1. 网络 (必选)
-    all_networks = sorted([x for x in raw_df['轮替网络'].unique() if x is not None])
-    selected_network = st.sidebar.selectbox("1️⃣ 网络 (Network):", options=all_networks, index=None, key="wf_net")
-
-    # 2. 广告类型 (必选)
-    all_adtypes = sorted(raw_df['Ad Type'].astype(str).unique().tolist()) if 'Ad Type' in raw_df.columns else []
-    selected_adtype = st.sidebar.selectbox("2️⃣ 广告类型 (Ad Type):", options=all_adtypes, index=None, key="wf_ad")
-
-    st.sidebar.markdown("#### 🔧 维度筛选")
-
-    # 3. 平台 (多选)
-    if 'Platform' in raw_df.columns:
-        all_platforms = sorted(raw_df['Platform'].astype(str).unique().tolist())
-        selected_platforms = st.sidebar.multiselect("3️⃣ 平台:", options=all_platforms, default=all_platforms, key="wf_plat")
-    else:
-        selected_platforms = []
-
-    # 4. 国家 (动态检测)
-    has_country = 'Country' in raw_df.columns
-    mask_country = True 
-
-    if has_country:
-        all_countries = sorted(raw_df['Country'].unique().astype(str).tolist())
-        selected_countries = st.sidebar.multiselect(
-            "4️⃣ 国家 (留空则默认全选):", 
-            options=all_countries, 
-            default=[], 
-            key="wf_ctry"
-        )
-        target_countries = selected_countries if selected_countries else all_countries
-        mask_country = raw_df['Country'].isin(target_countries)
-    else:
-        st.sidebar.info("🌐 数据源无 'Country' 列，展示全局数据")
-
-    if not selected_network or not selected_adtype:
-        st.warning("👈 请在左侧选择 **网络** 和 **广告类型** 以开始诊断。")
+    if df_pool is None or df_pool.empty:
+        st.error("⚠️ 当前筛选条件下无数据。")
         return
 
-    # --- 动态构建 Mask ---
-    mask_net = (raw_df['轮替网络'] == selected_network)
-    mask_ad = (raw_df['Ad Type'].astype(str) == selected_adtype)
-    mask_plat = raw_df['Platform'].isin(selected_platforms) if 'Platform' in raw_df.columns else True
-    
-    mask_base = mask_net & mask_ad & mask_plat & mask_country
-    df_base_filtered = raw_df[mask_base].copy()
-
-    # --- 吸顶导航 ---
+    # --- 吸顶导航栏 ---
     header_container = st.container()
     with header_container:
         st.markdown('<div class="sticky-nav">', unsafe_allow_html=True)
-        col_nav1, col_nav2 = st.columns([1, 2])
-        with col_nav1:
-            min_date, max_date = raw_df['Day'].min().date(), raw_df['Day'].max().date()
-            date_range = st.date_input("📅 日期范围:", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="wf_date")
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            min_date, max_date = df_pool['Day'].min().date(), df_pool['Day'].max().date()
+            date_range = st.date_input("📅 日期范围:", value=(min_date, max_date), min_value=min_date, max_value=max_date, key="bd_date")
             start_date, end_date = date_range if len(date_range) == 2 else (min_date, max_date)
-        with col_nav2:
-            sub_mode = st.radio("📍 诊断视角:", ["1. 轮替效果分析", "2. 策略健康度诊断"], horizontal=True, key="wf_sub_mode")
+            
+        with col2:
+            # 动态获取当前池子里的网络
+            all_networks = sorted(df_pool['轮替网络'].dropna().astype(str).unique().tolist())
+            selected_network = st.selectbox(
+                "🕸️ 选择网络 (必选):", options=all_networks, index=None, placeholder="请选择网络...", key="bd_net"
+            )
+
+        with col3:
+            sub_mode = st.radio(
+                "📍 诊断视角:", 
+                ["1. 策略健康度诊断", "2. 轮替效果分析"], 
+                horizontal=True, 
+                key="bd_mode"
+            )
+            
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 日期过滤
-    mask_date = (df_base_filtered['Day'].dt.date >= start_date) & (df_base_filtered['Day'].dt.date <= end_date)
-    df_filtered = df_base_filtered[mask_date].copy()
+    # --- 提示被过滤的网络 ---
+    hidden_nets = get_hidden_networks_hint(raw_df, df_pool)
+    if hidden_nets:
+        if not selected_network: # 只有当还没选网络时提示，避免干扰
+             st.info(f"ℹ️ **提示**: 列表仅显示 **{selected_adtype}** 下的数据。网络 {', '.join(hidden_nets)} 由于不包含此类型的广告数据，已自动隐藏。")
 
-    if df_filtered.empty:
-        st.error("⚠️ 当前筛选无数据。")
+    if not selected_network:
+        st.info("👋 请在上方选择一个 **网络** 以开始细分诊断。")
         return
 
-    # --- KPI & Charts ---
+    # --- 二次过滤 ---
+    mask_final = (
+        (df_pool['Day'].dt.date >= start_date) & 
+        (df_pool['Day'].dt.date <= end_date) &
+        (df_pool['轮替网络'] == selected_network)
+    )
+    df_filtered = df_pool[mask_final].copy()
+
+    if df_filtered.empty:
+        st.error(f"⚠️ 网络 {selected_network} 在当前时间范围内无数据。")
+        return
+
+    # --- KPI ---
     kpi_rev = df_filtered['Revenue'].sum()
     kpi_imp = df_filtered['Impressions'].sum()
     kpi_ecpm = (kpi_rev / kpi_imp * 1000) if kpi_imp > 0 else 0
     
-    st.markdown(f"#### 📊 {selected_network} 核心指标")
+    st.header(f"🔬 细分数据: {selected_network} ({selected_adtype})")
     k1, k2, k3 = st.columns(3)
     k1.metric("💰 总收入", f"${kpi_rev:,.2f}")
     k2.metric("📉 平均 eCPM", f"${kpi_ecpm:,.2f}")
     k3.metric("👁️ 总展示", f"{kpi_imp:,.0f}")
     st.markdown("---")
 
-    # 子视图逻辑
-    if sub_mode == "1. 轮替效果分析":
-        st.subheader("🔄 轮替版本生命周期")
+    # --- 1. 策略健康度诊断 ---
+    if sub_mode == "1. 策略健康度诊断":
+        st.subheader("📈 瀑布流分层诊断 (Strategy Health)")
+        
+        agg = df_filtered.groupby(['Application', 'eCPM_修正后']).agg({'Attempts':'sum', 'Responses':'sum', 'Revenue':'sum'}).reset_index()
+        agg['Weighted_Fill_Rate'] = agg.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else 0, axis=1)
+        
+        app_rev_sum = agg.groupby('Application')['Revenue'].transform('sum')
+        agg['Rev_Share'] = (agg['Revenue'] / app_rev_sum * 100).fillna(0)
+        
+        fig_macro = px.scatter(
+            agg[agg['Weighted_Fill_Rate']>0], 
+            x="eCPM_修正后", y="Weighted_Fill_Rate", size="Revenue", color="Application",
+            log_x=True, log_y=True, opacity=0.7, size_max=60, 
+            title=f"eCPM vs Fill Rate ({selected_network}) - Bubble Size: Revenue"
+        )
+        fig_macro.add_hline(y=1, line_dash="dot", line_color="red")
+        st.plotly_chart(fig_macro, use_container_width=True)
+
+        st.divider()
+        
+        u_apps = sorted(agg['Application'].unique().tolist())
+        idx_2 = get_session_index('bd_app_diag', u_apps)
+        sel_app_2 = st.selectbox("🔎 深度诊断 App (查看具体 Floor 结构):", u_apps, index=idx_2, key='bd_app_diag')
+        
+        if sel_app_2:
+            d_app = agg[agg['Application'] == sel_app_2].sort_values('eCPM_修正后')
+            if not d_app.empty:
+                fig_micro = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_micro.add_trace(go.Bar(
+                    x=d_app['eCPM_修正后'].astype(str), y=d_app['Weighted_Fill_Rate'], name="Fill Rate (%)",
+                    marker_color='rgba(55, 128, 191, 0.7)'
+                ), secondary_y=False)
+                fig_micro.add_trace(go.Scatter(
+                    x=d_app['eCPM_修正后'].astype(str), y=d_app['Rev_Share'], name="Revenue Share (%)",
+                    marker_color='crimson', mode='lines+markers'
+                ), secondary_y=True)
+                
+                fig_micro.update_layout(
+                    title=f"<b>{sel_app_2} Waterfall Structure</b>", 
+                    height=550, legend=dict(orientation="h", y=1.1),
+                    xaxis_title="eCPM Floor", yaxis_title="Fill Rate (%)", yaxis2_title="Revenue Share (%)"
+                )
+                st.plotly_chart(fig_micro, use_container_width=True)
+
+    # --- 2. 轮替效果分析 ---
+    elif sub_mode == "2. 轮替效果分析":
+        st.subheader("🔄 轮替版本生命周期 (Rotation Analysis)")
         c1, c2 = st.columns(2)
         unique_apps = sorted(df_filtered['Application'].unique().tolist())
         with c1:
-            idx = get_session_index('wf_app_1', unique_apps)
-            sel_app = st.selectbox("选择 App:", unique_apps, index=idx, key='wf_app_1')
-            thresh = st.number_input("过滤展示量 <", value=50, step=10, key='wf_th')
+            idx = get_session_index('bd_app_rot', unique_apps)
+            sel_app = st.selectbox("选择 App:", unique_apps, index=idx, key='bd_app_rot')
+            thresh = st.number_input("过滤展示量 <", value=50, step=10, key='bd_th')
         
         chart_data = pd.DataFrame()
         sel_ecpm = None
@@ -330,7 +452,7 @@ def render_waterfall_dashboard(raw_df):
                 else:
                     av_ecpms = sorted(app_data['eCPM_修正后'].unique())
                     if av_ecpms:
-                        sel_ecpm = st.selectbox("选择 eCPM 层:", av_ecpms, key='wf_ec')
+                        sel_ecpm = st.selectbox("选择 eCPM 层:", av_ecpms, key='bd_ec')
                         chart_data = app_data[app_data['eCPM_修正后'] == sel_ecpm]
 
         if not chart_data.empty:
@@ -338,46 +460,16 @@ def render_waterfall_dashboard(raw_df):
             agg['Fill Rate'] = agg.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else 0, axis=1)
             agg = agg.sort_values('Day')
             agg['Date_Str'] = agg['Day'].dt.strftime('%Y-%m-%d')
+            
             title = f'<b>{sel_app}</b>' + (' - GAM' if is_gam else f' - Floor: ${sel_ecpm}')
             fig = px.line(agg, x='Date_Str', y='Fill Rate', color='轮替版本', markers=True, title=title)
             fig.update_layout(yaxis_title="Fill Rate (%)", xaxis_title="Date", hovermode="x unified", height=500, legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
-
-    elif sub_mode == "2. 策略健康度诊断":
-        st.subheader("📈 瀑布流分层诊断")
-        agg = df_filtered.groupby(['Application', 'eCPM_修正后']).agg({'Attempts':'sum', 'Responses':'sum', 'Revenue':'sum'}).reset_index()
-        agg['Weighted_Fill_Rate'] = agg.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else 0, axis=1)
-        agg['Rev_Share'] = (agg['Revenue'] / agg.groupby('Application')['Revenue'].transform('sum') * 100).fillna(0)
-        
-        fig_macro = px.scatter(
-            agg[agg['Weighted_Fill_Rate']>0], x="eCPM_修正后", y="Weighted_Fill_Rate", size="Revenue", color="Application",
-            log_x=True, log_y=True, opacity=0.7, size_max=60, title=f"eCPM vs Fill Rate ({selected_network})"
-        )
-        fig_macro.add_hline(y=1, line_dash="dot", line_color="red")
-        st.plotly_chart(fig_macro, use_container_width=True)
-
-        st.divider()
-        u_apps = sorted(agg['Application'].unique().tolist())
-        idx_2 = get_session_index('wf_app_2', u_apps)
-        sel_app_2 = st.selectbox("深度诊断 App:", u_apps, index=idx_2, key='wf_app_2')
-        
-        if sel_app_2:
-            d_app = agg[agg['Application'] == sel_app_2].sort_values('eCPM_修正后')
-            if not d_app.empty:
-                fig_micro = make_subplots(specs=[[{"secondary_y": True}]])
-                fig_micro.add_trace(go.Bar(
-                    x=d_app['eCPM_修正后'].astype(str), y=d_app['Weighted_Fill_Rate'], name="Fill Rate",
-                    marker_color='rgba(55, 128, 191, 0.7)'
-                ), secondary_y=False)
-                fig_micro.add_trace(go.Scatter(
-                    x=d_app['eCPM_修正后'].astype(str), y=d_app['Rev_Share'], name="Rev Share",
-                    marker_color='crimson', mode='lines+markers'
-                ), secondary_y=True)
-                fig_micro.update_layout(title=f"<b>{sel_app_2} Waterfall Structure</b>", height=550, legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig_micro, use_container_width=True)
+        else:
+            st.warning("该筛选条件下无足够数据生成轮替曲线。")
 
 
-# ================= 3. 其他预留模块 =================
+# ================= 其他预留模块 =================
 def render_bidding_dashboard():
     st.info("🚧 **Bidding 模块开发中**")
 
@@ -391,25 +483,37 @@ def main():
     # 顶级导航
     app_mode = st.sidebar.radio(
         "选择板块:",
-        ["🏆 大盘概览 (Benchmark)", "🌊 Waterfall (轮替)", "🔨 Bidding (竞价)", "🎯 DSP/直投"],
+        ["📁 数据源预览", "waterfall 全局数据概览", "waterfall 细分数据", "🔨 Bidding (竞价)", "🎯 DSP/直投"],
         index=0,
         key="main_nav"
     )
-    st.sidebar.markdown("---")
+    
+    # 共享的文件上传逻辑
+    uploaded_file = st.sidebar.file_uploader("📂 上传报表 (xlsx/csv):", type=['xlsx', 'csv'], key="shared_uploader")
+    
+    raw_df = None
+    if uploaded_file:
+        raw_df = process_raw_data(uploaded_file)
+    else:
+        if app_mode not in ["🔨 Bidding (竞价)", "🎯 DSP/直投"]:
+             st.info("👋 请先在左侧上传数据文件以开始分析。")
 
-    if app_mode in ["🏆 大盘概览 (Benchmark)", "🌊 Waterfall (轮替)"]:
-        st.sidebar.markdown("### 📂 数据源")
-        uploaded_file = st.sidebar.file_uploader("上传 AppLovin 报表", type=['xlsx', 'csv'], key="shared_uploader")
-        
-        if uploaded_file:
-            raw_df = process_raw_data(uploaded_file)
-            if raw_df is not None:
-                if app_mode == "🏆 大盘概览 (Benchmark)":
-                    render_benchmark_dashboard(raw_df)
-                elif app_mode == "🌊 Waterfall (轮替)":
-                    render_waterfall_dashboard(raw_df)
-        else:
-            st.info("👋 请先在左侧上传数据文件以开始分析。")
+    # 路由分发
+    if app_mode == "📁 数据源预览":
+        render_data_preview_dashboard(raw_df)
+
+    elif app_mode == "waterfall 全局数据概览":
+        if raw_df is not None:
+            df_pool, selected_adtype = render_sidebar(raw_df)
+            if df_pool is not None:
+                # 传入 raw_df 用于比对被隐藏的网络
+                render_global_overview(df_pool, raw_df, selected_adtype)
+
+    elif app_mode == "waterfall 细分数据":
+        if raw_df is not None:
+            df_pool, selected_adtype = render_sidebar(raw_df)
+            if df_pool is not None:
+                render_breakdown_dashboard(df_pool, raw_df, selected_adtype)
 
     elif app_mode == "🔨 Bidding (竞价)":
         render_bidding_dashboard()
