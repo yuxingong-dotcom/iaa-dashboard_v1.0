@@ -8,11 +8,11 @@ def identify_network(placement):
     """识别广告网络"""
     if pd.isnull(placement): return None
     placement = str(placement)
-    if '/90851098,21819256933/34065401/' in placement: return 'Rek'
-    elif '/60257202,21819256933/' in placement: return 'A4G'
-    elif 'ca-mb-app-pub-2385332075335369' in placement: return 'GAM'
-    elif '/75894840,21819256933/p20404/a78007/' in placement: return 'Premium'
-    elif '/22904705113,21819256933/20404:77448/' in placement: return 'Premium'
+    if '/90851098' in placement: return 'Rek'
+    elif '/60257202' in placement: return 'A4G'
+    elif 'ca-mb-app-pub' in placement: return 'GAM'
+    elif '/75894840' in placement: return 'Premium'
+    elif '/22904705113' in placement: return 'Premium'
     return 'Other'
 
 def extract_version(row):
@@ -96,7 +96,7 @@ def assign_ecpm_range(row):
     # 2. INTER 和 RV 逻辑 (包含 INTERSTITIAL, REWARDED, RV)
     elif 'INTER' in ad_type or 'REWARD' in ad_type or 'RV' in ad_type:
         if 0 <= ecpm < 0.30: return 'I01:0-0.30'
-        if 0.30 <= ecpm < 0.60: return 'I02:0.30-0.60' # 补全空缺，防止漏数据
+        if 0.30 <= ecpm < 0.60: return 'I02:0.30-0.60' 
         if 0.60 <= ecpm < 0.80: return 'I03:0.60-0.80'
         if 0.80 <= ecpm < 1.00: return 'I04:0.80-1.00'
         if 1.00 <= ecpm < 1.20: return 'I05:1.00-1.20'
