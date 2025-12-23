@@ -161,7 +161,7 @@ def render_data_preview_dashboard(raw_df):
     st.download_button(label="⬇️ 下载 CSV", data=csv, file_name='processed_iaa_data.csv', mime='text/csv')
 
 
-# ================= 模块 1: Waterfall 全局数据概览 (全动态色阶版) =================
+# ================= 模块 1: Waterfall 全局数据概览 (UI 统一终极版) =================
 def render_global_overview(df_pool, raw_df, selected_adtype):
     # --- CSS: 强制放大 Dataframe 字体 ---
     st.markdown("""
@@ -215,9 +215,9 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
 
     st.header(f"🌊 Waterfall 全局数据概览: {selected_adtype}")
 
-    # ================= PART 1: 综合概览 (双列热力表 - 动态色阶) =================
+    # ================= PART 1: 综合概览 (双列热力表) =================
     st.subheader("1. 综合概览 (Fill Rate & RPM)")
-    st.markdown("💡 **说明**: 颜色深浅根据**当前视图最大值**动态生成。绿色代表填充率，蓝色代表RPM。")
+    st.markdown("💡 **绿色列**: 填充率 (Fill Rate) | **蓝色列**: 变现效率 (RPM)")
 
     agg_range = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({
         'Attempts': 'sum', 'Responses': 'sum', 'Revenue': 'sum'
@@ -235,14 +235,8 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
     styler = pivot_df.style
     styler.format("{:.2f}%", subset=idx[:, idx[:, 'Fill Rate']], na_rep="-")
     styler.format("${:.4f}", subset=idx[:, idx[:, 'RPM']], na_rep="-")
-    
-    # 【核心优化点】
-    # 1. Fill Rate: 去掉 vmax=100，保留 vmin=0 (防止0变灰)。axis=None 表示在全表范围内计算最大值进行着色。
     styler.background_gradient(cmap='Greens', subset=idx[:, idx[:, 'Fill Rate']], vmin=0, axis=None)
-    
-    # 2. RPM: 同样使用 axis=None，确保不同网络的 RPM 颜色是可横向对比的。
     styler.background_gradient(cmap='Blues', subset=idx[:, idx[:, 'RPM']], axis=None)
-    
     styler.set_properties(**{'text-align': 'center', 'width': '100px'})
     styler.highlight_null(color='transparent')
 
@@ -250,24 +244,26 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
 
     st.divider()
 
-    # ================= PART 2: 每日趋势全景 (支持切换视图) =================
+    # ================= PART 2: 每日趋势全景 (双列布局) =================
     c_title, c_toggle = st.columns([3, 2])
     with c_title:
-        st.subheader("2. 每日趋势全景 (Daily Trend by Range)")
+        st.subheader("2. 每日趋势全景 (Daily Trend: Fill Rate vs RPM)")
     with c_toggle:
         view_mode = st.radio(
             "👀 选择视图模式:", 
-            ["分层热力图 (Stacked Heatmap)", "分面折线图 (Facet Line Chart)"], 
+            ["分层热力图 (Side-by-Side Heatmaps)", "分面折线图 (Grid Line Charts)"], 
             horizontal=True,
             label_visibility="collapsed"
         )
 
+    # 1. 数据聚合
     agg_daily = df_filtered.groupby(['Day', 'eCPM_Range', '轮替网络']).agg({
-        'Attempts': 'sum', 'Responses': 'sum'
+        'Attempts': 'sum', 'Responses': 'sum', 'Revenue': 'sum'
     }).reset_index()
     
     agg_daily['Date_Str'] = agg_daily['Day'].dt.strftime('%Y-%m-%d')
     agg_daily['Fill Rate'] = agg_daily.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
+    agg_daily['RPM'] = agg_daily.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
     
     all_dates = sorted(agg_daily['Date_Str'].unique())
     available_ranges = sorted(agg_daily['eCPM_Range'].unique())
@@ -275,78 +271,119 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
 
     if not agg_daily.empty:
         
-        # --- 模式 A: 分层热力图 (动态色阶版) ---
-        if view_mode == "分层热力图 (Stacked Heatmap)":
-            st.markdown("💡 **说明**: 颜色深浅是相对于**当前层级最大值**动态计算的。")
+        # 准备子图标题
+        subplot_titles = []
+        for r in available_ranges:
+            subplot_titles.append(f"{r} - Fill Rate")
+            subplot_titles.append(f"{r} - RPM")
             
-            rows_count = len(available_ranges)
+        rows_count = len(available_ranges)
+        
+        # --- 模式 A: 双列分层热力图 ---
+        if view_mode == "分层热力图 (Side-by-Side Heatmaps)":
+            st.markdown("💡 **左侧绿色**: Fill Rate % | **右侧蓝色**: RPM $")
             subplot_height = max(len(display_networks) * 35 + 50, 180)
             total_height = rows_count * subplot_height
 
             fig_stack = make_subplots(
-                rows=rows_count, cols=1, 
-                subplot_titles=available_ranges, 
-                vertical_spacing=0.06, 
+                rows=rows_count, cols=2, 
+                subplot_titles=subplot_titles, # 标题在上方
+                vertical_spacing=0.06, horizontal_spacing=0.05,
                 shared_xaxes=True
             )
 
             for i, range_val in enumerate(available_ranges):
                 df_sub = agg_daily[agg_daily['eCPM_Range'] == range_val]
-                pivot_sub = df_sub.pivot(index='轮替网络', columns='Date_Str', values='Fill Rate')
-                pivot_sub = pivot_sub.reindex(index=display_networks, columns=all_dates)
-
-                text_matrix = pivot_sub.applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "")
                 
-                # 动态计算当前层级的最大值
-                local_max = pivot_sub.max().max()
-                if pd.isna(local_max) or local_max == 0:
-                    local_max = 100 
+                # 左图: Fill Rate
+                pivot_fr = df_sub.pivot(index='轮替网络', columns='Date_Str', values='Fill Rate')
+                pivot_fr = pivot_fr.reindex(index=display_networks, columns=all_dates)
+                text_fr = pivot_fr.applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "")
+                max_fr = pivot_fr.max().max()
+                if pd.isna(max_fr) or max_fr == 0: max_fr = 100
 
                 fig_stack.add_trace(go.Heatmap(
-                    z=pivot_sub.values, x=pivot_sub.columns, y=pivot_sub.index,
-                    text=text_matrix.values, 
-                    texttemplate="%{text}", 
-                    textfont={"size": 12},
-                    colorscale="Greens",
-                    zmin=0, zmax=local_max, 
-                    showscale=False, 
+                    z=pivot_fr.values, x=pivot_fr.columns, y=pivot_fr.index,
+                    text=text_fr.values, texttemplate="%{text}", textfont={"size": 12},
+                    colorscale="Greens", zmin=0, zmax=max_fr, showscale=False
                 ), row=i+1, col=1)
 
-            fig_stack.update_layout(
-                height=total_height, 
-                margin=dict(l=0, r=0, t=40, b=0),
-                font=dict(size=14)
-            )
-            fig_stack.update_xaxes(showticklabels=True, row=rows_count, col=1) 
+                # 右图: RPM
+                pivot_rpm = df_sub.pivot(index='轮替网络', columns='Date_Str', values='RPM')
+                pivot_rpm = pivot_rpm.reindex(index=display_networks, columns=all_dates)
+                text_rpm = pivot_rpm.applymap(lambda x: f"${x:.2f}" if pd.notnull(x) else "")
+                max_rpm = pivot_rpm.max().max()
+                if pd.isna(max_rpm) or max_rpm == 0: max_rpm = 10
+
+                fig_stack.add_trace(go.Heatmap(
+                    z=pivot_rpm.values, x=pivot_rpm.columns, y=pivot_rpm.index,
+                    text=text_rpm.values, texttemplate="%{text}", textfont={"size": 12},
+                    colorscale="Blues", zmin=0, zmax=max_rpm, showscale=False
+                ), row=i+1, col=2)
+
+            fig_stack.update_layout(height=total_height, margin=dict(l=0, r=0, t=40, b=0), font=dict(size=14))
+            fig_stack.update_xaxes(showticklabels=True, row=rows_count, col=1)
+            fig_stack.update_xaxes(showticklabels=True, row=rows_count, col=2)
             st.plotly_chart(fig_stack, use_container_width=True)
 
-        # --- 模式 B: 分面折线图 ---
+        # --- 模式 B: 双列分面折线图 (重构为手写 Scatter) ---
         else:
-            st.markdown("💡 **适合场景**: 快速识别**波动趋势**和网络间的**差距**。")
+            st.markdown("💡 **趋势对比**: 点击图例可隐藏/显示特定网络。")
             
-            chart_height = max(500, len(available_ranges) * 250)
+            # 为每个网络分配固定颜色，防止子图间颜色乱序
+            colors = px.colors.qualitative.Plotly
+            net_color_map = {net: colors[i % len(colors)] for i, net in enumerate(display_networks)}
 
-            fig_facet = px.line(
-                agg_daily, 
-                x="Date_Str", y="Fill Rate", color="轮替网络", 
-                facet_row="eCPM_Range", 
-                category_orders={"eCPM_Range": available_ranges}, 
-                markers=True,
-                title="各区间填充率每日走势"
+            subplot_height = 250 # 折线图稍微高一点
+            total_height = rows_count * subplot_height
+
+            fig_grid = make_subplots(
+                rows=rows_count, cols=2,
+                subplot_titles=subplot_titles, # 标题在上方，与热力图统一
+                vertical_spacing=0.08, horizontal_spacing=0.05,
+                shared_xaxes=True
             )
-            
-            fig_facet.update_layout(
-                height=chart_height,
+
+            for i, range_val in enumerate(available_ranges):
+                df_sub = agg_daily[agg_daily['eCPM_Range'] == range_val]
+                
+                # 遍历每个网络画线
+                for net in display_networks:
+                    net_data = df_sub[df_sub['轮替网络'] == net]
+                    
+                    # 如果该网络在该区间无数据，跳过画线 (或者画空线)
+                    if net_data.empty:
+                        continue
+
+                    # 左图: Fill Rate 线
+                    fig_grid.add_trace(go.Scatter(
+                        x=net_data['Date_Str'], y=net_data['Fill Rate'],
+                        mode='lines+markers', name=net,
+                        line=dict(color=net_color_map.get(net, 'grey')),
+                        legendgroup=net, # 核心：分组图例，点击一个控制所有
+                        showlegend=(i==0) # 只在第一行显示图例
+                    ), row=i+1, col=1)
+
+                    # 右图: RPM 线
+                    fig_grid.add_trace(go.Scatter(
+                        x=net_data['Date_Str'], y=net_data['RPM'],
+                        mode='lines+markers', name=net,
+                        line=dict(color=net_color_map.get(net, 'grey')),
+                        legendgroup=net, # 同组
+                        showlegend=False # 不重复显示图例
+                    ), row=i+1, col=2)
+
+            fig_grid.update_layout(
+                height=total_height, 
                 margin=dict(l=0, r=0, t=60, b=0),
                 hovermode="x unified",
-                legend=dict(orientation="h", y=1.01, x=0.5, xanchor="center", font=dict(size=14)), 
+                legend=dict(orientation="h", y=1.005, x=0.5, xanchor="center", font=dict(size=14)),
                 font=dict(size=14)
             )
-            fig_facet.update_yaxes(matches=None, showticklabels=True, title_font=dict(size=14))
-            fig_facet.update_xaxes(title_font=dict(size=14))
-            fig_facet.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1], font=dict(size=14)))
-
-            st.plotly_chart(fig_facet, use_container_width=True)
+            # 独立 Y 轴范围
+            fig_grid.update_yaxes(showticklabels=True)
+            
+            st.plotly_chart(fig_grid, use_container_width=True)
 
     else:
         st.warning("无每日趋势数据")
