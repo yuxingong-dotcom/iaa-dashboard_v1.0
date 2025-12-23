@@ -161,12 +161,23 @@ def render_data_preview_dashboard(raw_df):
     st.download_button(label="⬇️ 下载 CSV", data=csv, file_name='processed_iaa_data.csv', mime='text/csv')
 
 
-# ================= 模块 1: Waterfall 全局数据概览 =================
+# ================= 模块 1: Waterfall 全局数据概览 (全动态色阶版) =================
 def render_global_overview(df_pool, raw_df, selected_adtype):
+    # --- CSS: 强制放大 Dataframe 字体 ---
+    st.markdown("""
+        <style>
+        div[data-testid="stDataFrame"] { font-size: 1.1rem !important; }
+        div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th {
+            font-size: 1.1rem !important; padding: 8px !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     if df_pool is None or df_pool.empty:
         st.error("⚠️ 当前筛选条件下无数据。")
         return
-    # 吸顶导航
+
+    # --- 吸顶导航栏 ---
     header_container = st.container()
     with header_container:
         st.markdown('<div class="sticky-nav">', unsafe_allow_html=True)
@@ -183,7 +194,6 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
             selected_nets = st.multiselect("🕸️ 筛选 Network (留空全选):", options=available_nets, default=[], key="ov_net")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 提示被过滤网络
     hidden_nets = get_hidden_networks_hint(raw_df, df_pool)
     if hidden_nets:
         st.caption(f"ℹ️ **提示**: 网络 {', '.join(hidden_nets)} 不含 **{selected_adtype}** 数据。")
@@ -204,73 +214,142 @@ def render_global_overview(df_pool, raw_df, selected_adtype):
         return
 
     st.header(f"🌊 Waterfall 全局数据概览: {selected_adtype}")
-    available_ranges = sorted(df_filtered['eCPM_Range'].unique().tolist())
 
-    # PART 1: Fill Rate
-    st.subheader("1. 填充率 (Fill Rate %)")
-    agg_range = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({'Attempts': 'sum', 'Responses': 'sum'}).reset_index()
+    # ================= PART 1: 综合概览 (双列热力表 - 动态色阶) =================
+    st.subheader("1. 综合概览 (Fill Rate & RPM)")
+    st.markdown("💡 **说明**: 颜色深浅根据**当前视图最大值**动态生成。绿色代表填充率，蓝色代表RPM。")
+
+    agg_range = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({
+        'Attempts': 'sum', 'Responses': 'sum', 'Revenue': 'sum'
+    }).reset_index()
+
     agg_range['Fill Rate'] = agg_range.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
-    pivot_fill = agg_range.pivot(index='eCPM_Range', columns='轮替网络', values='Fill Rate').sort_index()
-    pivot_fill = clean_axis_labels(pivot_fill) 
+    agg_range['RPM'] = agg_range.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
 
-    if not pivot_fill.empty:
-        fig_heat_fill = px.imshow(pivot_fill, labels=dict(x="Network", y="Price Range", color="FR%"), text_auto='.2f', aspect="auto", color_continuous_scale="Greens")
-        fig_heat_fill.update_yaxes(tickfont=dict(size=12))
-        fig_heat_fill.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0))
-        st.plotly_chart(fig_heat_fill, use_container_width=True)
-    else: st.info("无数据")
+    pivot_df = agg_range.pivot(index='eCPM_Range', columns='轮替网络', values=['Fill Rate', 'RPM'])
+    pivot_df.columns = pivot_df.columns.swaplevel(0, 1)
+    pivot_df.sort_index(axis=1, inplace=True)
+    pivot_df = clean_axis_labels(pivot_df)
 
-    with st.expander("📅 每日趋势明细 (Daily Trend)", expanded=True):
-        c_filter, c_chart = st.columns([1, 4])
-        with c_filter:
-            st.markdown("<br>", unsafe_allow_html=True)
-            sel_range_fill = st.selectbox("🔍 eCPM 区间:", available_ranges, key="daily_fill_range")
-        with c_chart:
-            df_sub = df_filtered[df_filtered['eCPM_Range'] == sel_range_fill]
-            if not df_sub.empty:
-                agg_daily = df_sub.groupby(['Day', '轮替网络']).agg({'Attempts':'sum', 'Responses':'sum'}).reset_index()
-                agg_daily['Date_Str'] = agg_daily['Day'].dt.strftime('%Y-%m-%d')
-                agg_daily['Fill Rate'] = agg_daily.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
-                pivot_daily = agg_daily.pivot(index='轮替网络', columns='Date_Str', values='Fill Rate')
-                if not pivot_daily.empty:
-                    fig_d = px.imshow(pivot_daily, labels=dict(x="Date", y="Network", color="FR%"), text_auto='.2f', aspect="auto", color_continuous_scale="Greens")
-                    fig_d.update_layout(height=400, margin=dict(l=0,r=0,t=20,b=0))
-                    st.plotly_chart(fig_d, use_container_width=True)
-            else: st.warning("该区间无数据")
+    idx = pd.IndexSlice
+    styler = pivot_df.style
+    styler.format("{:.2f}%", subset=idx[:, idx[:, 'Fill Rate']], na_rep="-")
+    styler.format("${:.4f}", subset=idx[:, idx[:, 'RPM']], na_rep="-")
+    
+    # 【核心优化点】
+    # 1. Fill Rate: 去掉 vmax=100，保留 vmin=0 (防止0变灰)。axis=None 表示在全表范围内计算最大值进行着色。
+    styler.background_gradient(cmap='Greens', subset=idx[:, idx[:, 'Fill Rate']], vmin=0, axis=None)
+    
+    # 2. RPM: 同样使用 axis=None，确保不同网络的 RPM 颜色是可横向对比的。
+    styler.background_gradient(cmap='Blues', subset=idx[:, idx[:, 'RPM']], axis=None)
+    
+    styler.set_properties(**{'text-align': 'center', 'width': '100px'})
+    styler.highlight_null(color='transparent')
+
+    st.dataframe(styler, use_container_width=True, height=600)
 
     st.divider()
 
-    # PART 2: RPM
-    st.subheader("2. 变现效率 (RPM - Per 1M Requests)")
-    agg_rpm = df_filtered.groupby(['eCPM_Range', '轮替网络']).agg({'Attempts': 'sum', 'Revenue': 'sum'}).reset_index()
-    agg_rpm['RPM'] = agg_rpm.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
-    pivot_rpm = agg_rpm.pivot(index='eCPM_Range', columns='轮替网络', values='RPM').sort_index()
-    pivot_rpm = clean_axis_labels(pivot_rpm)
+    # ================= PART 2: 每日趋势全景 (支持切换视图) =================
+    c_title, c_toggle = st.columns([3, 2])
+    with c_title:
+        st.subheader("2. 每日趋势全景 (Daily Trend by Range)")
+    with c_toggle:
+        view_mode = st.radio(
+            "👀 选择视图模式:", 
+            ["分层热力图 (Stacked Heatmap)", "分面折线图 (Facet Line Chart)"], 
+            horizontal=True,
+            label_visibility="collapsed"
+        )
 
-    if not pivot_rpm.empty:
-        fig_heat_rpm = px.imshow(pivot_rpm, labels=dict(x="Network", y="Price Range", color="RPM ($)"), text_auto='.2f', aspect="auto", color_continuous_scale="Blues")
-        fig_heat_rpm.update_yaxes(tickfont=dict(size=12))
-        fig_heat_rpm.update_layout(height=450, margin=dict(l=0,r=0,t=0,b=0))
-        st.plotly_chart(fig_heat_rpm, use_container_width=True)
+    agg_daily = df_filtered.groupby(['Day', 'eCPM_Range', '轮替网络']).agg({
+        'Attempts': 'sum', 'Responses': 'sum'
+    }).reset_index()
+    
+    agg_daily['Date_Str'] = agg_daily['Day'].dt.strftime('%Y-%m-%d')
+    agg_daily['Fill Rate'] = agg_daily.apply(lambda x: (x['Responses']/x['Attempts']*100) if x['Attempts']>0 else None, axis=1)
+    
+    all_dates = sorted(agg_daily['Date_Str'].unique())
+    available_ranges = sorted(agg_daily['eCPM_Range'].unique())
+    display_networks = sorted(target_nets) 
 
-    with st.expander("📅 每日趋势明细 (Daily Trend)", expanded=True):
-        c_filter_r, c_chart_r = st.columns([1, 4])
-        with c_filter_r:
-            st.markdown("<br>", unsafe_allow_html=True)
-            sel_range_rpm = st.selectbox("🔍 eCPM 区间:", available_ranges, key="daily_rpm_range")
-        with c_chart_r:
-            df_sub_r = df_filtered[df_filtered['eCPM_Range'] == sel_range_rpm]
-            if not df_sub_r.empty:
-                agg_daily_r = df_sub_r.groupby(['Day', '轮替网络']).agg({'Attempts':'sum', 'Revenue':'sum'}).reset_index()
-                agg_daily_r['Date_Str'] = agg_daily_r['Day'].dt.strftime('%Y-%m-%d')
-                agg_daily_r['RPM'] = agg_daily_r.apply(lambda x: (x['Revenue']/x['Attempts']*1000000) if x['Attempts']>0 else None, axis=1)
-                pivot_daily_r = agg_daily_r.pivot(index='轮替网络', columns='Date_Str', values='RPM')
-                if not pivot_daily_r.empty:
-                    fig_dr = px.imshow(pivot_daily_r, labels=dict(x="Date", y="Network", color="RPM"), text_auto='.0f', aspect="auto", color_continuous_scale="Blues")
-                    fig_dr.update_layout(height=400, margin=dict(l=0,r=0,t=20,b=0))
-                    st.plotly_chart(fig_dr, use_container_width=True)
-            else: st.warning("该区间无数据")
+    if not agg_daily.empty:
+        
+        # --- 模式 A: 分层热力图 (动态色阶版) ---
+        if view_mode == "分层热力图 (Stacked Heatmap)":
+            st.markdown("💡 **说明**: 颜色深浅是相对于**当前层级最大值**动态计算的。")
+            
+            rows_count = len(available_ranges)
+            subplot_height = max(len(display_networks) * 35 + 50, 180)
+            total_height = rows_count * subplot_height
 
+            fig_stack = make_subplots(
+                rows=rows_count, cols=1, 
+                subplot_titles=available_ranges, 
+                vertical_spacing=0.06, 
+                shared_xaxes=True
+            )
+
+            for i, range_val in enumerate(available_ranges):
+                df_sub = agg_daily[agg_daily['eCPM_Range'] == range_val]
+                pivot_sub = df_sub.pivot(index='轮替网络', columns='Date_Str', values='Fill Rate')
+                pivot_sub = pivot_sub.reindex(index=display_networks, columns=all_dates)
+
+                text_matrix = pivot_sub.applymap(lambda x: f"{x:.1f}%" if pd.notnull(x) else "")
+                
+                # 动态计算当前层级的最大值
+                local_max = pivot_sub.max().max()
+                if pd.isna(local_max) or local_max == 0:
+                    local_max = 100 
+
+                fig_stack.add_trace(go.Heatmap(
+                    z=pivot_sub.values, x=pivot_sub.columns, y=pivot_sub.index,
+                    text=text_matrix.values, 
+                    texttemplate="%{text}", 
+                    textfont={"size": 12},
+                    colorscale="Greens",
+                    zmin=0, zmax=local_max, 
+                    showscale=False, 
+                ), row=i+1, col=1)
+
+            fig_stack.update_layout(
+                height=total_height, 
+                margin=dict(l=0, r=0, t=40, b=0),
+                font=dict(size=14)
+            )
+            fig_stack.update_xaxes(showticklabels=True, row=rows_count, col=1) 
+            st.plotly_chart(fig_stack, use_container_width=True)
+
+        # --- 模式 B: 分面折线图 ---
+        else:
+            st.markdown("💡 **适合场景**: 快速识别**波动趋势**和网络间的**差距**。")
+            
+            chart_height = max(500, len(available_ranges) * 250)
+
+            fig_facet = px.line(
+                agg_daily, 
+                x="Date_Str", y="Fill Rate", color="轮替网络", 
+                facet_row="eCPM_Range", 
+                category_orders={"eCPM_Range": available_ranges}, 
+                markers=True,
+                title="各区间填充率每日走势"
+            )
+            
+            fig_facet.update_layout(
+                height=chart_height,
+                margin=dict(l=0, r=0, t=60, b=0),
+                hovermode="x unified",
+                legend=dict(orientation="h", y=1.01, x=0.5, xanchor="center", font=dict(size=14)), 
+                font=dict(size=14)
+            )
+            fig_facet.update_yaxes(matches=None, showticklabels=True, title_font=dict(size=14))
+            fig_facet.update_xaxes(title_font=dict(size=14))
+            fig_facet.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1], font=dict(size=14)))
+
+            st.plotly_chart(fig_facet, use_container_width=True)
+
+    else:
+        st.warning("无每日趋势数据")
 
 # ================= 模块 2: Waterfall 细分数据 =================
 def render_breakdown_dashboard(df_pool, raw_df, selected_adtype):
@@ -540,7 +619,7 @@ def main():
     elif app_mode == "🎯 DSP/直投":
         render_dsp_dashboard()
 
-# test123
+# test123456
 
 
 if __name__ == "__main__":
